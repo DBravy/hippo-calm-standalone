@@ -288,4 +288,4 @@ This work builds on insights from our prior research on [patch-level training](h
 
 ## Contact
 
-If you have any questions, feel free to submit an issue or contact `chenzeshao@tencent.com`.
+If you have any questions, feel free to submit an issue or contact `shaochenze@deepseek.com`.
