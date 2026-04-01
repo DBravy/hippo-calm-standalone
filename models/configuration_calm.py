@@ -136,6 +136,10 @@ class CALMConfig(PretrainedConfig):
         attention_bias=False,
         attention_dropout=0.0,
         mlp_bias=False,
+        # Hopfield / hippocampal parameters
+        num_semantic_patterns=None,
+        hopfield_top_k=8,
+        semantic_momentum=0.99,
         **kwargs,
     ):
         self.ae_path = ae_path
@@ -169,6 +173,10 @@ class CALMConfig(PretrainedConfig):
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mlp_bias = mlp_bias
+        # Hopfield: num semantic patterns per layer (default: hidden_size // 4)
+        self.num_semantic_patterns = num_semantic_patterns if num_semantic_patterns is not None else hidden_size // 4
+        self.hopfield_top_k = hopfield_top_k
+        self.semantic_momentum = semantic_momentum
 
         super().__init__(
             pad_token_id=pad_token_id,
