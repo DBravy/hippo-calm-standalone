@@ -143,13 +143,14 @@ class HippoDecoderLayer(nn.Module):
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Memory-to-gate projection: translates retrieval into gating signal
-        self.mem_gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
+        # Memory projection: translates retrieval into input modification
+        self.mem_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
 
-    def memory_modulated_mlp(self, x, mem_gate_bias):
-        """SwiGLU with memory-modulated gate: memory controls which cortical circuits fire."""
-        gate = F.silu(self.mlp.gate_proj(x) + mem_gate_bias)
-        up = self.mlp.up_proj(x)
+    def memory_modulated_mlp(self, x, y_hop):
+        """SwiGLU where memory modifies the input before both gate and signal pathways."""
+        x_mod = x + self.mem_proj(y_hop)
+        gate = F.silu(self.mlp.gate_proj(x_mod))
+        up = self.mlp.up_proj(x_mod)
         return self.mlp.down_proj(gate * up)
 
     def forward(self, hidden_states, **kwargs):
@@ -158,10 +159,9 @@ class HippoDecoderLayer(nn.Module):
         # Hopfield retrieval (hippocampal read)
         y_hop = self.hopfield(self.input_layernorm(hidden_states))
 
-        # Memory-modulated MLP (cortical computation gated by memory)
+        # Memory-modulated MLP (cortical computation on memory-blended input)
         normed = self.post_attention_layernorm(hidden_states)
-        mem_gate_bias = self.mem_gate_proj(y_hop)
-        hidden_states = residual + self.memory_modulated_mlp(normed, mem_gate_bias)
+        hidden_states = residual + self.memory_modulated_mlp(normed, y_hop)
 
         # Store post-MLP residual for consolidation (hippocampal write of cortical activity)
         if self.training:
