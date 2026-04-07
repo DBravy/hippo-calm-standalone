@@ -5,6 +5,8 @@ import sys
 import os
 import json
 import time
+import argparse
+from datetime import datetime
 sys.path.insert(0, os.path.dirname(__file__))
 
 import torch
@@ -30,22 +32,35 @@ def load_wikitext(path, tokenizer, block_size):
     return torch.tensor(chunks, dtype=torch.long)
 
 
-def print_semantic_diagnostics(model):
-    """Print W_semantic SVD spectrum and effective rank per layer."""
+def get_semantic_diagnostics(model):
+    """Compute W_semantic SVD spectrum and effective rank per layer."""
+    diagnostics = []
     print("\n  Semantic memory per layer:")
     for i, layer in enumerate(model.transformer.layers):
         h = layer.hopfield
         if not h.has_semantic.item():
             print(f"    layer {i}: inactive")
+            diagnostics.append({"layer": i, "active": False})
             continue
         S = torch.linalg.svdvals(h.W_semantic.cpu())
         S_norm = S / S.sum()
         eff_rank = torch.exp(-torch.sum(S_norm * torch.log(S_norm + 1e-10))).item()
         top5 = S[:5].tolist()
         print(f"    layer {i}: ||W||={S.sum():.2f}, eff_rank={eff_rank:.1f}, top5_sv={[f'{v:.3f}' for v in top5]}")
+        diagnostics.append({
+            "layer": i, "active": True,
+            "W_norm": S.sum().item(), "eff_rank": eff_rank,
+            "top5_sv": top5, "full_sv": S.tolist(),
+        })
+    return diagnostics
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--save", nargs="?", const="", default=None,
+                        help="Save run with optional name (uses timestamp if blank)")
+    args = parser.parse_args()
+
     # --- Device ---
     if torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -101,15 +116,34 @@ def main():
 
     # --- Optimizer ---
     batch_size = 4
-    num_epochs = 10
+    num_epochs = 50
     optimizer = torch.optim.Adam(
         [p for p in model.parameters() if p.requires_grad], lr=3e-4
     )
 
     # --- Training ---
-    print(f"\nTraining: {num_epochs} epochs, batch_size={batch_size}")
+    steps_per_epoch = (train_data.shape[0] - batch_size + 1) // batch_size
+    total_steps = steps_per_epoch * num_epochs
+    # Target ~500 logged steps regardless of run length; log every step for short runs
+    log_interval = max(1, total_steps // 500)
+
+    print(f"\nTraining: {num_epochs} epochs, batch_size={batch_size}, "
+          f"{steps_per_epoch} steps/epoch, {total_steps} total, log every {log_interval}")
     print(f"{'epoch':>5}  {'step':>5}  {'loss':>10}  {'grad_norm':>10}  {'ms':>6}")
     print("-" * 50)
+
+    run_log = {
+        "config": {k: v for k, v in config.to_dict().items()},
+        "training": {
+            "batch_size": batch_size, "num_epochs": num_epochs, "lr": 3e-4,
+            "steps_per_epoch": steps_per_epoch, "total_steps": total_steps,
+            "log_interval": log_interval,
+        },
+        "trainable_params": trainable,
+        "device": str(device),
+        "steps": [],
+        "epochs": [],
+    }
 
     global_step = 0
     for epoch in range(num_epochs):
@@ -133,8 +167,15 @@ def main():
             model.consolidate()
             dt = (time.time() - t0) * 1000
 
-            epoch_losses.append(loss.item())
-            print(f"{epoch:5d}  {global_step:5d}  {loss.item():10.4f}  {grad_norm:10.4f}  {dt:6.0f}")
+            step_loss = loss.item()
+            step_grad = grad_norm.item() if torch.is_tensor(grad_norm) else grad_norm
+            epoch_losses.append(step_loss)
+            if global_step % log_interval == 0:
+                run_log["steps"].append({
+                    "epoch": epoch, "step": global_step,
+                    "loss": step_loss, "grad_norm": step_grad, "ms": dt,
+                })
+            print(f"{epoch:5d}  {global_step:5d}  {step_loss:10.4f}  {step_grad:10.4f}  {dt:6.0f}")
             global_step += 1
 
         avg_loss = sum(epoch_losses) / len(epoch_losses)
@@ -151,9 +192,30 @@ def main():
         model.train()
 
         print(f"  --> epoch {epoch} avg train={avg_loss:.4f}, val={val_loss:.4f}")
-        print_semantic_diagnostics(model)
+        diagnostics = get_semantic_diagnostics(model)
+
+        run_log["epochs"].append({
+            "epoch": epoch, "train_loss": avg_loss, "val_loss": val_loss,
+            "semantic_diagnostics": diagnostics,
+        })
 
     print("\nDone.")
+
+    # --- Save run log + weights ---
+    os.makedirs("runs", exist_ok=True)
+    if args.save is not None:
+        name = args.save or datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_dir = f"runs/{name}"
+        os.makedirs(run_dir, exist_ok=True)
+        log_path = f"{run_dir}/log.json"
+        weights_path = f"{run_dir}/weights.pt"
+        torch.save(model.state_dict(), weights_path)
+        print(f"Weights saved to {weights_path}")
+    else:
+        log_path = "runs/latest.json"
+    with open(log_path, "w") as f:
+        json.dump(run_log, f, indent=2)
+    print(f"Run log saved to {log_path}")
 
 
 if __name__ == "__main__":

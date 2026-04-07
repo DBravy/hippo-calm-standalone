@@ -1,0 +1,9 @@
+# Model weights
+runs/*/weights.pt
+*.pt
+*.pth
+*.bin
+*.safetensors
+
+# Run logs (keep saved runs, ignore scratch)
+runs/latest.json

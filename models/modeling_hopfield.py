@@ -69,17 +69,27 @@ class HopfieldLayer(nn.Module):
             self._semantic_target_norm = W_new.norm().item()
             self.has_semantic.fill_(True)
         else:
-            # Replay: read through existing structure, then deposit.
-            # This amplifies directions where memory already has structure,
-            # reinforcing multiple principal components rather than collapsing.
+            # Per-pattern adaptive blend between raw deposit and replay.
+            # Strong retrieval (aligned with dominant directions) -> more raw deposit
+            # to dilute amplification. Weak retrieval (orthogonal) -> more replay
+            # to reinforce whatever structure exists.
             retrieved = centered @ self.W_semantic  # (N, D)
-            retrieved = F.normalize(retrieved, dim=-1)  # prevent magnitude explosion
-            W_replay = (retrieved.T @ retrieved) / retrieved.shape[0]
+            # Alignment: how strongly each pattern activates existing structure
+            alignment = (retrieved * centered).sum(dim=-1, keepdim=True)  # (N, 1)
+            alignment = alignment / (centered.norm(dim=-1, keepdim=True) *
+                                     retrieved.norm(dim=-1, keepdim=True) + 1e-8)
+            # alpha=1 means fully raw, alpha=0 means fully replay
+            alpha = alignment.abs()  # (N, 1), in [0, 1]
+
+            retrieved = F.normalize(retrieved, dim=-1)
+            blended = alpha * centered + (1 - alpha) * retrieved  # (N, D)
+            blended = F.normalize(blended, dim=-1)
+
+            W_new = (blended.T @ blended) / blended.shape[0]
             self.W_semantic.mul_(self.semantic_momentum).add_(
-                W_replay, alpha=1 - self.semantic_momentum
+                W_new, alpha=1 - self.semantic_momentum
             )
             # Renormalize to maintain constant energy.
-            # EMA controls direction (which subspaces survive), this controls magnitude.
             current_norm = self.W_semantic.norm().item()
             if current_norm > 1e-8:
                 self.W_semantic.mul_(self._semantic_target_norm / current_norm)
